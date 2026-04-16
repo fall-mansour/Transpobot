@@ -332,53 +332,89 @@ function badge(val) { return `<span class="badge-status s-${val}">${val.replace(
 async function loadDashboard() {
   try {
     const r = await fetch(`${API}/api/dashboard/kpis`);
-    const { data: d } = await r.json();
+    const response = await r.json();
+    const d = response.data; // On récupère le d à partir de response.data
+
     document.getElementById('kpi-container').innerHTML = `
       <div class="kpi-grid">
-        <div class="kpi-card"><div class="kpi-icon">🚌</div><div class="kpi-label">Véhicules total</div><div class="kpi-value c-blue">${d.vehicules.total}</div><div class="kpi-sub">${d.vehicules.actif||0} actifs · ${d.vehicules.maintenance||0} maint.</div></div>
-        <div class="kpi-card"><div class="kpi-icon">👤</div><div class="kpi-label">Chauffeurs disponibles</div><div class="kpi-value c-green">${d.chauffeurs.actifs}</div><div class="kpi-sub">Sur ${d.chauffeurs.total} total</div></div>
-        <div class="kpi-card"><div class="kpi-icon">🗺️</div><div class="kpi-label">Trajets aujourd'hui</div><div class="kpi-value c-yellow">${d.trajets_aujourd_hui.total}</div><div class="kpi-sub">${d.trajets_aujourd_hui.termines||0} terminés · ${d.trajets_aujourd_hui.en_cours||0} en cours</div></div>
-        <div class="kpi-card"><div class="kpi-icon">💰</div><div class="kpi-label">Recette semaine</div><div class="kpi-value c-green" style="font-size:1.4rem;">${Number(d.trajets_semaine.recette).toLocaleString('fr-SN')}</div><div class="kpi-sub">FCFA · ${d.trajets_semaine.total} trajets</div></div>
-        <div class="kpi-card"><div class="kpi-icon">⚠️</div><div class="kpi-label">Incidents ouverts</div><div class="kpi-value ${d.incidents_ouverts>0?'c-red':'c-green'}">${d.incidents_ouverts}</div><div class="kpi-sub">${d.incidents_ouverts>0?'Nécessitent attention':'Tout est résolu ✓'}</div></div>
-        <div class="kpi-card"><div class="kpi-icon">📊</div><div class="kpi-label">Taux annulation</div><div class="kpi-value c-yellow">${d.trajets_aujourd_hui.total > 0 ? Math.round((d.trajets_aujourd_hui.annules||0)/d.trajets_aujourd_hui.total*100) : 0}%</div><div class="kpi-sub">Aujourd'hui</div></div>
+        <div class="kpi-card">
+            <div class="kpi-icon">🚌</div>
+            <div class="kpi-label">Véhicules total</div>
+            <div class="kpi-value c-blue">${d.vehicules.total}</div>
+            <div class="kpi-sub">${d.vehicules.actif || 0} actifs · ${d.vehicules.maintenance || 0} maint.</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-icon">👤</div>
+            <div class="kpi-label">Chauffeurs actifs</div>
+            <div class="kpi-value c-green">${d.chauffeurs.actifs}</div>
+            <div class="kpi-sub">Sur ${d.chauffeurs.total} total</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-icon">🗺️</div>
+            <div class="kpi-label">Trajets aujourd'hui</div>
+            <div class="kpi-value c-yellow">${d.trajets_aujourd_hui.total}</div>
+            <div class="kpi-sub">${d.trajets_aujourd_hui.termines || 0} terminés</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-icon">⚠️</div>
+            <div class="kpi-label">Incidents ouverts</div>
+            <div class="kpi-value ${d.incidents_ouverts > 0 ? 'c-red' : 'c-green'}">${d.incidents_ouverts}</div>
+            <div class="kpi-sub">${d.incidents_ouverts > 0 ? 'Nécessitent attention' : 'Tout est résolu ✓'}</div>
+        </div>
       </div>`;
+    
     document.getElementById('incidents-badge').textContent = d.incidents_ouverts || '0';
   } catch(e) {
-    document.getElementById('kpi-container').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div>Erreur de connexion à l'API. Vérifiez que le serveur tourne sur ${API}</div>`;
+    console.error("Détail de l'erreur KPI:", e);
+    document.getElementById('kpi-container').innerHTML = `
+      <div class="empty">
+        <div class="empty-icon">⚠️</div>
+        Erreur de chargement. Le serveur Render est peut-être en train de se réveiller. 
+        <br><button onclick="loadDashboard()" style="margin-top:10px; cursor:pointer; padding:5px 10px;">Réessayer</button>
+      </div>`;
   }
+
+  // Chargement des trajets récents et des lignes
   try {
     const r = await fetch(`${API}/api/trajets?limit=6`);
-    const { data } = await r.json();
+    const trajRes = await r.json();
+    const trajets = trajRes.data;
+
     document.getElementById('recent-trajets-wrap').innerHTML = `
       <div style="padding:1rem 1.5rem;border-bottom:1px solid var(--border);font-size:.875rem;font-weight:600;background:var(--surface2);">🕐 Trajets récents</div>
       <table style="width:100%;border-collapse:collapse;font-size:.8rem;">
         <thead><tr>
-          <th style="padding:.6rem 1rem;color:var(--text-dim);font-size:.7rem;text-align:left;background:var(--surface2);">Ligne</th>
-          <th style="padding:.6rem 1rem;color:var(--text-dim);font-size:.7rem;text-align:left;background:var(--surface2);">Chauffeur</th>
-          <th style="padding:.6rem 1rem;color:var(--text-dim);font-size:.7rem;text-align:left;background:var(--surface2);">Statut</th>
+          <th style="padding:.6rem 1rem;text-align:left;background:var(--surface2);">Ligne</th>
+          <th style="padding:.6rem 1rem;text-align:left;background:var(--surface2);">Chauffeur</th>
+          <th style="padding:.6rem 1rem;text-align:left;background:var(--surface2);">Statut</th>
         </tr></thead>
-        <tbody>${data.map(t=>`<tr>
+        <tbody>${trajets.map(t=>`<tr>
           <td style="padding:.6rem 1rem;border-top:1px solid var(--border);color:var(--accent);font-weight:600;">${t.ligne_code}</td>
-          <td style="padding:.6rem 1rem;border-top:1px solid var(--border);color:var(--text-mid);">${t.chauffeur_prenom} ${t.chauffeur_nom}</td>
+          <td style="padding:.6rem 1rem;border-top:1px solid var(--border);">${t.chauffeur_prenom} ${t.chauffeur_nom}</td>
           <td style="padding:.6rem 1rem;border-top:1px solid var(--border);">${badge(t.statut)}</td>
         </tr>`).join('')}</tbody>
       </table>`;
+
     const rl = await fetch(`${API}/api/lignes`);
-    const { data: lignes } = await rl.json();
+    const ligneRes = await rl.json();
+    const lignes = ligneRes.data;
+    
     const max = Math.max(...lignes.map(l=>l.total_trajets||0));
     const colors = ['#2563eb','#059669','#d97706','#7c3aed','#dc2626'];
+    
     document.getElementById('lignes-chart-wrap').innerHTML = `
       <div style="padding:1rem 1.5rem;border-bottom:1px solid var(--border);font-size:.875rem;font-weight:600;background:var(--surface2);">📈 Activité par ligne</div>
       <div class="bar-chart">${lignes.map((l,i)=>`
         <div class="bar-row">
           <div class="bar-label">${l.code}</div>
-          <div class="bar-track"><div class="bar-fill" style="width:${max?Math.round((l.total_trajets||0)/max*100):0}%;background:${colors[i%5]};"></div></div>
+          <div class="bar-track"><div class="bar-fill" style="width:${max > 0 ? Math.round((l.total_trajets||0)/max*100) : 0}%;background:${colors[i%5]};"></div></div>
           <div class="bar-val">${l.total_trajets||0} traj.</div>
         </div>`).join('')}
       </div>`;
-  } catch(e) {}
+  } catch(e) {
+    console.error("Erreur chargement listes:", e);
+  }
 }
-
 let allVehicules = [];
 async function loadVehicules() {
   if (allVehicules.length) return;
