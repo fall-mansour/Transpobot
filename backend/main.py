@@ -50,8 +50,14 @@ DB_CONFIG = {
 }
 
 # Initialisation OpenAI
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+OPENAI_API_KEY = "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"
+
+if OPENAI_API_KEY:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    logger.info("✅ Client OpenAI initialisé avec la clé directe.")
+else:
+    client = None
+    logger.error("❌ Aucune clé fournie.")
 
 # ============================================================
 # 2. FONCTIONS DE BASE DE DONNÉES
