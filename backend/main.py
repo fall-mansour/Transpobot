@@ -2,6 +2,7 @@
 SmartTech Central - Backend Final
 Gestion de Transport Urbain avec IA
 ESP/UCAD - Licence 3 GLSi
+Migré vers Anthropic Claude
 """
 
 from fastapi import FastAPI, HTTPException
@@ -13,7 +14,7 @@ from typing import Optional, List
 import mysql.connector
 import os
 import logging
-from openai import OpenAI
+import anthropic
 from datetime import datetime
 
 # ============================================================
@@ -24,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="SmartTech Central API",
-    description="API de gestion de transport urbain avec assistant IA",
-    version="1.0.0"
+    description="API de gestion de transport urbain avec assistant IA (Claude)",
+    version="2.0.0"
 )
 
 # Configuration du CORS pour le Frontend
@@ -49,12 +50,14 @@ DB_CONFIG = {
     "autocommit": True
 }
 
-# Initialisation OpenAI
-# On récupère la clé ET on l'enregistre dans la variable
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# Initialisation Anthropic Claude
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
-# Maintenant on peut créer le client
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+if client:
+    logger.info("✅ Client Anthropic Claude initialisé avec succès")
+else:
+    logger.warning("⚠️ Clé ANTHROPIC_API_KEY manquante - Chatbot en mode démo")
 
 # ============================================================
 # 2. FONCTIONS DE BASE DE DONNÉES
@@ -104,14 +107,14 @@ def get_kpis():
         # Véhicules
         veh = execute_query("SELECT statut, COUNT(*) as count FROM vehicules GROUP BY statut")
         v_stats = {v["statut"]: v["count"] for v in veh}
-        
+
         # Chauffeurs
         ch_res = execute_query("SELECT COUNT(*) as total, SUM(disponibilite=1) as actifs FROM chauffeurs")
         chauf = ch_res[0] if ch_res else {"total": 0, "actifs": 0}
-        
+
         # Trajets aujourd'hui
         tr_res = execute_query("""
-            SELECT COUNT(*) as total, SUM(statut='termine') as termines, 
+            SELECT COUNT(*) as total, SUM(statut='termine') as termines,
             COALESCE(SUM(recette),0) as recette_totale
             FROM trajets WHERE DATE(date_heure_depart) = CURDATE()
         """)
@@ -137,7 +140,7 @@ def get_kpis():
 def get_lignes():
     sql = """
         SELECT l.*, COUNT(t.id) as total_trajets, AVG(t.nb_passagers) as moy_passagers
-        FROM lignes l LEFT JOIN trajets t ON l.id = t.ligne_id 
+        FROM lignes l LEFT JOIN trajets t ON l.id = t.ligne_id
         GROUP BY l.id ORDER BY l.code
     """
     return {"data": execute_query(sql)}
@@ -153,7 +156,7 @@ def get_chauffeurs():
 @app.get("/api/trajets")
 def get_trajets(limit: int = 30):
     sql = """
-        SELECT t.*, l.code as ligne_code, v.immatriculation, 
+        SELECT t.*, l.code as ligne_code, v.immatriculation,
         c.nom as chauffeur_nom, c.prenom as chauffeur_prenom
         FROM trajets t
         LEFT JOIN lignes l ON t.ligne_id = l.id
@@ -168,7 +171,7 @@ def get_incidents(limit: int = 30):
     return {"data": execute_query("SELECT * FROM incidents ORDER BY date_incident DESC LIMIT %s", (limit,))}
 
 # ============================================================
-# 5. LOGIQUE DU CHATBOT (APPEL RÉEL OPENAI)
+# 5. LOGIQUE DU CHATBOT (ANTHROPIC CLAUDE)
 # ============================================================
 
 class ChatMessage(BaseModel):
@@ -178,37 +181,63 @@ class ChatMessage(BaseModel):
 @app.post("/api/chat")
 async def chat(payload: ChatMessage):
     if not client:
-        logger.error("❌ OpenAI Client non configuré (Clé manquante)")
-        return {"response": "Assistant en mode démo. Vérifiez votre clé API sur Render."}
-    
+        logger.warning("⚠️ Client Anthropic non configuré - réponse démo")
+        return {"response": "Assistant en mode démo. Veuillez configurer la variable ANTHROPIC_API_KEY sur Render."}
+
     try:
-        # Contexte système
-        messages = [{
-            "role": "system", 
-            "content": "Tu es l'assistant intelligent de SmartTech Central. Tu aides à gérer le transport urbain. Réponds de manière utile et polie."
-        }]
-        
-        # Historique
+        # Construction de l'historique des messages
+        # Anthropic attend une liste de messages avec role "user" / "assistant"
+        # Note: le message "system" est passé séparément dans l'API Anthropic
+        messages = []
+
         if payload.history:
-            messages.extend(payload.history[-5:])
-            
-        # Message utilisateur
+            # On garde les 5 derniers échanges pour limiter les tokens
+            for msg in payload.history[-10:]:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                # Anthropic n'accepte que "user" et "assistant" (pas "system" dans messages)
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": content})
+
+        # Ajout du message courant de l'utilisateur
         messages.append({"role": "user", "content": payload.message})
 
-        # Appel API
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            temperature=0.7
+        # Appel à l'API Anthropic Claude
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",   # Modèle rapide et économique
+            max_tokens=1024,
+            system=(
+                "Tu es l'assistant intelligent de SmartTech Central, "
+                "une plateforme de gestion de transport urbain au Sénégal. "
+                "Tu aides les opérateurs à gérer les véhicules, chauffeurs, lignes, "
+                "trajets et incidents. Réponds toujours en français, de manière "
+                "claire, utile et professionnelle. Si on te pose une question hors "
+                "du domaine transport, redirige poliment vers ton rôle principal."
+            ),
+            messages=messages
         )
 
-        return {"response": response.choices[0].message.content}
+        # Extraction du texte de la réponse
+        reply = response.content[0].text
+        logger.info(f"✅ Réponse Claude générée ({response.usage.output_tokens} tokens)")
+
+        return {"response": reply}
+
+    except anthropic.AuthenticationError:
+        logger.error("❌ Clé API Anthropic invalide")
+        return {"response": "Erreur d'authentification : vérifiez votre clé ANTHROPIC_API_KEY."}
+
+    except anthropic.RateLimitError:
+        logger.error("❌ Limite de taux Anthropic atteinte")
+        return {"response": "Trop de requêtes envoyées. Veuillez patienter quelques secondes."}
+
+    except anthropic.APIStatusError as e:
+        logger.error(f"❌ Erreur API Anthropic [{e.status_code}]: {e.message}")
+        return {"response": "Une erreur est survenue avec l'assistant IA. Réessayez dans un moment."}
 
     except Exception as e:
-        logger.error(f"❌ Erreur OpenAI: {e}")
-        if "insufficient_quota" in str(e):
-            return {"response": "Erreur : Quota OpenAI épuisé. Veuillez vérifier vos crédits."}
-        return {"response": "Désolé, je ne peux pas répondre pour le moment."}
+        logger.error(f"❌ Erreur inattendue: {e}")
+        return {"response": "Désolé, je ne peux pas répondre pour le moment. Veuillez réessayer."}
 
 # ============================================================
 # 6. LANCEMENT & STATIQUES
@@ -222,4 +251,10 @@ elif os.path.exists("frontend/static"):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "db": "connected", "time": datetime.now()}
+    return {
+        "status": "ok",
+        "ai_provider": "Anthropic Claude",
+        "ai_model": "claude-haiku-4-5-20251001",
+        "ai_ready": client is not None,
+        "time": datetime.now().isoformat()
+    }
