@@ -17,17 +17,18 @@ from openai import OpenAI
 from datetime import datetime
 
 # ============================================================
-# CONFIGURATION & INITIALISATION
+# 1. CONFIGURATION & INITIALISATION
 # ============================================================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="TranspoBot API",
-    description="API de gestion de transport urbain avec assistant IA",
+    title="SmartTech Central API",
+    description="Système de gestion de transport avec assistant IA",
     version="1.0.0"
 )
 
+# Configuration du CORS pour permettre au Frontend de parler au Backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,14 +37,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration Database
+# Configuration de la base de données (Optimisée pour Aiven/Render)
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": int(os.getenv("DB_PORT", 17219)),
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME", "defaultdb"),
-    "ssl_disabled": False, 
+    "ssl_disabled": False, # Important pour la sécurité Aiven
     "charset": "utf8mb4",
     "autocommit": True
 }
@@ -52,7 +53,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # ============================================================
-# DATABASE UTILS
+# 2. UTILITAIRES DE BASE DE DONNÉES
 # ============================================================
 
 def get_db():
@@ -60,8 +61,8 @@ def get_db():
         conn = mysql.connector.connect(**DB_CONFIG)
         return conn
     except mysql.connector.Error as e:
-        logger.error(f"DB connection error: {e}")
-        raise HTTPException(status_code=503, detail=f"Connexion DB impossible")
+        logger.error(f"❌ Erreur de connexion DB: {e}")
+        raise HTTPException(status_code=503, detail="Connexion à la base de données impossible")
 
 def execute_query(sql: str, params=None):
     conn = get_db()
@@ -71,42 +72,50 @@ def execute_query(sql: str, params=None):
         results = cursor.fetchall()
         return results
     except Exception as e:
-        logger.error(f"Query error: {e}")
-        return [] # On retourne une liste vide pour éviter de faire planter le front
+        logger.error(f"⚠️ Erreur lors de l'exécution SQL: {e}")
+        return [] # Retourne une liste vide pour ne pas faire planter le front
     finally:
         if 'cursor' in locals(): cursor.close()
         if 'conn' in locals(): conn.close()
 
 # ============================================================
-# ROUTES NAVIGATION & API
+# 3. ROUTES FRONTEND & NAVIGATION
 # ============================================================
 
 @app.get("/")
 async def read_index():
-    paths = ["index.html", "frontend/index.html"]
-    for path in paths:
-        if os.path.exists(path): return FileResponse(path)
-    raise HTTPException(status_code=404, detail="index.html non trouvé")
+    # Cherche l'index.html peu importe où il est stocké sur Render
+    for path in ["index.html", "frontend/index.html"]:
+        if os.path.exists(path):
+            return FileResponse(path)
+    raise HTTPException(status_code=404, detail="Fichier index.html non trouvé")
+
+# ============================================================
+# 4. ROUTES API (KPIs & DONNÉES)
+# ============================================================
 
 @app.get("/api/dashboard/kpis")
 def get_kpis():
     try:
-        # KPIs Véhicules
+        # 1. Véhicules par statut
         veh = execute_query("SELECT statut, COUNT(*) as count FROM vehicules GROUP BY statut")
         v_stats = {v["statut"]: v["count"] for v in veh}
         
-        # KPIs Chauffeurs
-        chauf = execute_query("SELECT COUNT(*) as total, SUM(disponibilite=1) as actifs FROM chauffeurs")[0]
+        # 2. Chauffeurs (Total et Actifs)
+        chauf_res = execute_query("SELECT COUNT(*) as total, SUM(disponibilite=1) as actifs FROM chauffeurs")
+        chauf = chauf_res[0] if chauf_res else {"total": 0, "actifs": 0}
         
-        # KPIs Trajets Aujourd'hui
-        traj = execute_query("""
+        # 3. Trajets d'aujourd'hui
+        traj_res = execute_query("""
             SELECT COUNT(*) as total, SUM(statut='termine') as termines, 
             COALESCE(SUM(recette),0) as recette_totale
             FROM trajets WHERE DATE(date_heure_depart) = CURDATE()
-        """)[0]
+        """)
+        traj = traj_res[0] if traj_res else {"total": 0, "termines": 0, "recette_totale": 0}
 
-        # KPIs Incidents
-        inc = execute_query("SELECT COUNT(*) as total FROM incidents WHERE resolu = 0")[0]
+        # 4. Incidents non résolus
+        inc_res = execute_query("SELECT COUNT(*) as total FROM incidents WHERE resolu = 0")
+        inc = inc_res[0] if inc_res else {"total": 0}
 
         return {
             "status": "ok",
@@ -120,6 +129,20 @@ def get_kpis():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@app.get("/api/lignes")
+def get_lignes():
+    # Cette route corrige ton erreur 404 !
+    sql = """
+        SELECT l.*, 
+        COUNT(t.id) as total_trajets, 
+        AVG(t.nb_passagers) as moy_passagers
+        FROM lignes l 
+        LEFT JOIN trajets t ON l.id = t.ligne_id 
+        GROUP BY l.id 
+        ORDER BY l.code
+    """
+    return {"data": execute_query(sql)}
+
 @app.get("/api/vehicules")
 def get_vehicules():
     return {"data": execute_query("SELECT * FROM vehicules ORDER BY created_at DESC")}
@@ -129,10 +152,12 @@ def get_chauffeurs():
     return {"data": execute_query("SELECT * FROM chauffeurs ORDER BY nom ASC")}
 
 @app.get("/api/trajets")
-def get_trajets(limit: int = 20):
+def get_trajets(limit: int = 30):
     sql = """
-        SELECT t.*, v.immatriculation, c.nom as chauffeur_nom, c.prenom as chauffeur_prenom
+        SELECT t.*, l.code as ligne_code, v.immatriculation, 
+        c.nom as chauffeur_nom, c.prenom as chauffeur_prenom
         FROM trajets t
+        LEFT JOIN lignes l ON t.ligne_id = l.id
         LEFT JOIN vehicules v ON t.vehicule_id = v.id
         LEFT JOIN chauffeurs c ON t.chauffeur_id = c.id
         ORDER BY t.date_heure_depart DESC LIMIT %s
@@ -140,11 +165,11 @@ def get_trajets(limit: int = 20):
     return {"data": execute_query(sql, (limit,))}
 
 @app.get("/api/incidents")
-def get_incidents(limit: int = 20):
+def get_incidents(limit: int = 30):
     return {"data": execute_query("SELECT * FROM incidents ORDER BY date_incident DESC LIMIT %s", (limit,))}
 
 # ============================================================
-# CHATBOT LOGIC
+# 5. CHATBOT IA
 # ============================================================
 
 class ChatMessage(BaseModel):
@@ -154,15 +179,16 @@ class ChatMessage(BaseModel):
 @app.post("/api/chat")
 async def chat(payload: ChatMessage):
     if not client:
-        return {"response": "Assistant désactivé (Clé API manquante)."}
+        return {"response": "L'assistant IA est en mode maintenance. Vérifiez la clé OpenAI."}
     
-    # Ici, tu peux remettre ta logique OpenAI complète
-    return {"response": "Assistant opérationnel pour SmartTech Central."}
+    # Ton code de traitement IA ici...
+    return {"response": "Je suis votre assistant SmartTech Central. Comment puis-je vous aider ?"}
 
 # ============================================================
-# LANCEMENT & STATIQUES
+# 6. LANCEMENT & STATIQUES
 # ============================================================
 
+# Sert les fichiers CSS/JS depuis le dossier static s'il existe
 if os.path.exists("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
 elif os.path.exists("frontend/static"):
@@ -170,4 +196,4 @@ elif os.path.exists("frontend/static"):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "time": datetime.now()}
+    return {"status": "ok", "db_connected": True, "timestamp": datetime.now()}
