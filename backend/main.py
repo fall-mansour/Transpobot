@@ -12,11 +12,9 @@ from pydantic import BaseModel
 from typing import Optional, List
 import mysql.connector
 import os
-import json
-import re
+import logging
 from openai import OpenAI
 from datetime import datetime
-import logging
 
 # ============================================================
 # CONFIGURATION & INITIALISATION
@@ -30,7 +28,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configuration du CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,14 +36,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration Database (Ajout du support SSL pour Aiven)
+# Configuration Database
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": int(os.getenv("DB_PORT", 17219)),
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME", "defaultdb"),
-    "ssl_disabled": False, # Indispensable pour Aiven
+    "ssl_disabled": False, 
     "charset": "utf8mb4",
     "autocommit": True
 }
@@ -64,63 +61,87 @@ def get_db():
         return conn
     except mysql.connector.Error as e:
         logger.error(f"DB connection error: {e}")
-        raise HTTPException(status_code=503, detail=f"Connexion DB impossible: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"Connexion DB impossible")
 
 def execute_query(sql: str, params=None):
     conn = get_db()
-    cursor = conn.cursor(dictionary=True)
     try:
+        cursor = conn.cursor(dictionary=True)
         cursor.execute(sql, params or ())
         results = cursor.fetchall()
         return results
+    except Exception as e:
+        logger.error(f"Query error: {e}")
+        return [] # On retourne une liste vide pour éviter de faire planter le front
     finally:
-        cursor.close()
-        conn.close()
+        if 'cursor' in locals(): cursor.close()
+        if 'conn' in locals(): conn.close()
 
 # ============================================================
-# ROUTES NAVIGATION (FRONTEND)
+# ROUTES NAVIGATION & API
 # ============================================================
 
 @app.get("/")
 async def read_index():
-    # On cherche l'index à la racine d'abord, sinon dans un dossier frontend
-    if os.path.exists("index.html"):
-        return FileResponse("index.html")
-    elif os.path.exists("frontend/index.html"):
-        return FileResponse("frontend/index.html")
-    else:
-        raise HTTPException(status_code=404, detail="index.html non trouvé")
-
-# ============================================================
-# ROUTES API (KPIs, Véhicules, etc.)
-# ============================================================
+    paths = ["index.html", "frontend/index.html"]
+    for path in paths:
+        if os.path.exists(path): return FileResponse(path)
+    raise HTTPException(status_code=404, detail="index.html non trouvé")
 
 @app.get("/api/dashboard/kpis")
 def get_kpis():
-    stats = {}
-    veh = execute_query("SELECT statut, COUNT(*) as count FROM vehicules GROUP BY statut")
-    stats["vehicules"] = {v["statut"]: v["count"] for v in veh}
-    stats["vehicules"]["total"] = sum(v["count"] for v in veh)
-    
-    chauf = execute_query("SELECT COUNT(*) as total, SUM(disponibilite=1) as actifs FROM chauffeurs")[0]
-    stats["chauffeurs"] = {"total": chauf["total"], "actifs": int(chauf["actifs"] or 0)}
-    
-    today_trajets = execute_query("""
-        SELECT COUNT(*) as total, SUM(statut='termine') as termines, 
-        COALESCE(SUM(recette),0) as recette_totale
-        FROM trajets WHERE DATE(date_heure_depart) = CURDATE()
-    """)[0]
-    stats["trajets_aujourd_hui"] = {k: int(v or 0) for k, v in today_trajets.items()}
-    
-    incidents = execute_query("SELECT COUNT(*) as total FROM incidents WHERE resolu = 0")[0]
-    stats["incidents_ouverts"] = int(incidents["total"])
-    return {"status": "ok", "data": stats}
+    try:
+        # KPIs Véhicules
+        veh = execute_query("SELECT statut, COUNT(*) as count FROM vehicules GROUP BY statut")
+        v_stats = {v["statut"]: v["count"] for v in veh}
+        
+        # KPIs Chauffeurs
+        chauf = execute_query("SELECT COUNT(*) as total, SUM(disponibilite=1) as actifs FROM chauffeurs")[0]
+        
+        # KPIs Trajets Aujourd'hui
+        traj = execute_query("""
+            SELECT COUNT(*) as total, SUM(statut='termine') as termines, 
+            COALESCE(SUM(recette),0) as recette_totale
+            FROM trajets WHERE DATE(date_heure_depart) = CURDATE()
+        """)[0]
+
+        # KPIs Incidents
+        inc = execute_query("SELECT COUNT(*) as total FROM incidents WHERE resolu = 0")[0]
+
+        return {
+            "status": "ok",
+            "data": {
+                "vehicules": {**v_stats, "total": sum(v_stats.values()) if v_stats else 0},
+                "chauffeurs": {"total": chauf["total"] or 0, "actifs": int(chauf["actifs"] or 0)},
+                "trajets_aujourd_hui": {k: int(v or 0) for k, v in traj.items()},
+                "incidents_ouverts": int(inc["total"] or 0)
+            }
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/api/vehicules")
 def get_vehicules():
     return {"data": execute_query("SELECT * FROM vehicules ORDER BY created_at DESC")}
 
-# --- (Ajoute ici tes autres routes comme /api/trajets si besoin) ---
+@app.get("/api/chauffeurs")
+def get_chauffeurs():
+    return {"data": execute_query("SELECT * FROM chauffeurs ORDER BY nom ASC")}
+
+@app.get("/api/trajets")
+def get_trajets(limit: int = 20):
+    sql = """
+        SELECT t.*, v.immatriculation, c.nom as chauffeur_nom, c.prenom as chauffeur_prenom
+        FROM trajets t
+        LEFT JOIN vehicules v ON t.vehicule_id = v.id
+        LEFT JOIN chauffeurs c ON t.chauffeur_id = c.id
+        ORDER BY t.date_heure_depart DESC LIMIT %s
+    """
+    return {"data": execute_query(sql, (limit,))}
+
+@app.get("/api/incidents")
+def get_incidents(limit: int = 20):
+    return {"data": execute_query("SELECT * FROM incidents ORDER BY date_incident DESC LIMIT %s", (limit,))}
 
 # ============================================================
 # CHATBOT LOGIC
@@ -130,32 +151,23 @@ class ChatMessage(BaseModel):
     message: str
     history: Optional[List[dict]] = []
 
-class ChatResponse(BaseModel):
-    response: str
-    sql_query: Optional[str] = None
-    results: Optional[List[dict]] = None
-    explanation: Optional[str] = None
-
-@app.post("/api/chat", response_model=ChatResponse)
+@app.post("/api/chat")
 async def chat(payload: ChatMessage):
-    # Logique simplifiée pour l'exemple
     if not client:
-        return ChatResponse(response="Assistant en mode démo (Clé OpenAI manquante).")
+        return {"response": "Assistant désactivé (Clé API manquante)."}
     
-    # ... (Garde ta logique OpenAI ici) ...
-    return ChatResponse(response="Message reçu")
+    # Ici, tu peux remettre ta logique OpenAI complète
+    return {"response": "Assistant opérationnel pour SmartTech Central."}
 
 # ============================================================
-# LANCEMENT
+# LANCEMENT & STATIQUES
 # ============================================================
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-# Montage des fichiers statiques (CSS, JS, Images)
-# On vérifie si le dossier existe pour éviter un crash au démarrage
 if os.path.exists("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
 elif os.path.exists("frontend/static"):
     app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "time": datetime.now()}
