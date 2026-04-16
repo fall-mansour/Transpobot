@@ -313,10 +313,10 @@ td:first-child { color:var(--text); font-weight:500; }
 </main>
 
 <script>
-// Cette ligne détecte automatiquement si tu es sur Render ou en local
-const API_URL = window.location.origin;
+// On utilise 'API' car c'est ce nom que tu utilises dans tes fetch plus bas
+const API = window.location.origin;
 
-console.log("L'API utilisée est : ", API_URL); // Utile pour vérifier dans la console (F12)
+console.log("L'API utilisée est : ", API);
 function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
