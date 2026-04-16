@@ -1,0 +1,15 @@
+# Environnement virtuel
+venv/
+ENV/
+env/
+
+# Variables d'environnement (Sécurité !)
+.env
+
+# Python (Cache)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS
+.DS_Store
