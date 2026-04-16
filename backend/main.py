@@ -18,6 +18,25 @@ from openai import OpenAI
 from datetime import datetime
 import logging
 
+# 1. Création de l'application (INDISPENSABLE avant les routes)
+app = FastAPI()
+
+# 2. Configuration du CORS (Pour que ton frontend puisse parler au backend)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 3. Route pour servir l'index.html
+@app.get("/")
+async def read_index():
+    # Assure-toi que index.html est bien à la racine de ton projet GitHub
+    return FileResponse("index.html")
+
+# Tu peux ajouter ici tes autres routes (@app.post, etc.)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
